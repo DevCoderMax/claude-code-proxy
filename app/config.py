@@ -1,6 +1,7 @@
 """Configuration management for the Anthropic proxy server."""
 import os
-from typing import List
+import random
+from typing import List, Optional
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -9,10 +10,38 @@ load_dotenv()
 class Config:
     """Application configuration."""
     
-    # API Keys
-    ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
-    OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+    # API Keys - support multiple keys separated by commas
+    _ANTHROPIC_API_KEYS = [key.strip() for key in os.environ.get("ANTHROPIC_API_KEY", "").split(",") if key.strip()]
+    _OPENAI_API_KEYS = [key.strip() for key in os.environ.get("OPENAI_API_KEY", "").split(",") if key.strip()]
+    _GEMINI_API_KEYS = [key.strip() for key in os.environ.get("GEMINI_API_KEY", "").split(",") if key.strip()]
+    
+    @classmethod
+    def get_anthropic_api_key(cls) -> Optional[str]:
+        """Get a random Anthropic API key from available keys."""
+        return random.choice(cls._ANTHROPIC_API_KEYS) if cls._ANTHROPIC_API_KEYS else None
+    
+    @classmethod
+    def get_openai_api_key(cls) -> Optional[str]:
+        """Get a random OpenAI API key from available keys."""
+        return random.choice(cls._OPENAI_API_KEYS) if cls._OPENAI_API_KEYS else None
+    
+    @classmethod
+    def get_gemini_api_key(cls) -> Optional[str]:
+        """Get a random Gemini API key from available keys."""
+        return random.choice(cls._GEMINI_API_KEYS) if cls._GEMINI_API_KEYS else None
+    
+    # Backward compatibility - these will return the first key or None
+    @property
+    def ANTHROPIC_API_KEY(self) -> Optional[str]:
+        return self._ANTHROPIC_API_KEYS[0] if self._ANTHROPIC_API_KEYS else None
+    
+    @property
+    def OPENAI_API_KEY(self) -> Optional[str]:
+        return self._OPENAI_API_KEYS[0] if self._OPENAI_API_KEYS else None
+    
+    @property
+    def GEMINI_API_KEY(self) -> Optional[str]:
+        return self._GEMINI_API_KEYS[0] if self._GEMINI_API_KEYS else None
     
     # Provider preferences
     PREFERRED_PROVIDER = os.environ.get("PREFERRED_PROVIDER", "openai").lower()

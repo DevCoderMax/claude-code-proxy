@@ -121,13 +121,16 @@ async def root():
 def _set_api_key(litellm_request: dict, model: str):
     """Set the appropriate API key based on the model."""
     if model.startswith("openai/"):
-        litellm_request["api_key"] = Config.OPENAI_API_KEY
+        api_key = Config.get_openai_api_key()
+        litellm_request["api_key"] = api_key
         logger.debug(f"Using OpenAI API key for model: {model}")
     elif model.startswith("gemini/"):
-        litellm_request["api_key"] = Config.GEMINI_API_KEY
+        api_key = Config.get_gemini_api_key()
+        litellm_request["api_key"] = api_key
         logger.debug(f"Using Gemini API key for model: {model}")
     else:
-        litellm_request["api_key"] = Config.ANTHROPIC_API_KEY
+        api_key = Config.get_anthropic_api_key()
+        litellm_request["api_key"] = api_key
         logger.debug(f"Using Anthropic API key for model: {model}")
 
 def _handle_error(e: Exception) -> HTTPException:
