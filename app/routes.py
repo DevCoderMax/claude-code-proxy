@@ -2,8 +2,11 @@
 import json
 import time
 import logging
+import traceback
+from typing import Any, Dict, Union
+
 from fastapi import HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 import litellm
 
 from .models import MessagesRequest, TokenCountRequest, TokenCountResponse
@@ -17,102 +20,98 @@ from .utils.openai_compatibility import process_openai_request
 logger = logging.getLogger(__name__)
 
 async def create_message(request: MessagesRequest, raw_request: Request):
-    """Handle message creation requests."""
+    """Handle message creation requests by preparing, executing, and processing the request."""
     try:
-        # Parse raw request body to get original model
-        body = await raw_request.body()
-        body_json = json.loads(body.decode('utf-8'))
-        original_model = body_json.get("model", "unknown")
-        
-        # Get display name for logging
-        display_model = original_model.split("/")[-1] if "/" in original_model else original_model
-        
-        logger.debug(f"📊 PROCESSING REQUEST: Model={request.model}, Stream={request.stream}")
-        
-        # Convert Anthropic request to LiteLLM format
-        litellm_request = convert_anthropic_to_litellm(request)
-        
-        # Set appropriate API key based on model
-        _set_api_key(litellm_request, request.model)
-        
-        # Process OpenAI-specific requirements
-        if "openai" in litellm_request["model"]:
-            process_openai_request(litellm_request)
-        
-        # Log request details
-        num_tools = len(request.tools) if request.tools else 0
-        log_request_beautifully(
-            "POST", 
-            raw_request.url.path, 
-            display_model, 
-            litellm_request.get('model'),
-            len(litellm_request['messages']),
-            num_tools,
-            200
-        )
-        
-        # Handle streaming vs regular completion
-        if request.stream:
-            response_generator = await litellm.acompletion(**litellm_request)
-            return StreamingResponse(
-                handle_streaming(response_generator, request),
-                media_type="text/event-stream"
-            )
-        else:
-            start_time = time.time()
-            litellm_response = litellm.completion(**litellm_request)
-            logger.debug(f"✅ RESPONSE RECEIVED: Model={litellm_request.get('model')}, Time={time.time() - start_time:.2f}s")
-            
-            return convert_litellm_to_anthropic(litellm_response, request)
-                
+        litellm_request, display_model = await _prepare_litellm_request(request, raw_request)
+        litellm_response = await _execute_litellm_completion(litellm_request, request.stream)
+        return _process_litellm_response(litellm_response, request, litellm_request)
     except Exception as e:
         return _handle_error(e)
+
+async def _prepare_litellm_request(request: MessagesRequest, raw_request: Request) -> tuple[dict, str]:
+    """Prepare the LiteLLM request from the original Anthropic request."""
+    body = await raw_request.body()
+    original_model = json.loads(body.decode('utf-8')).get("model", "unknown")
+    display_model = original_model.split("/")[-1]
+
+    logger.debug(f"📊 PROCESSING REQUEST: Model={request.model}, Stream={request.stream}")
+
+    litellm_request = convert_anthropic_to_litellm(request)
+    _set_api_key(litellm_request, request.model)
+
+    if "openai" in litellm_request["model"]:
+        process_openai_request(litellm_request)
+
+    log_request_beautifully(
+        "POST",
+        raw_request.url.path,
+        display_model,
+        litellm_request.get('model'),
+        len(litellm_request['messages']),
+        len(request.tools or []),
+        200
+    )
+    return litellm_request, display_model
+
+async def _execute_litellm_completion(litellm_request: dict, stream: bool) -> Any:
+    """Execute the actual call to LiteLLM."""
+    if stream:
+        return await litellm.acompletion(**litellm_request)
+    
+    start_time = time.time()
+    response = litellm.completion(**litellm_request)
+    logger.debug(f"✅ RESPONSE RECEIVED: Model={litellm_request.get('model')}, Time={time.time() - start_time:.2f}s")
+    return response
+
+def _process_litellm_response(
+    litellm_response: Any,
+    request: MessagesRequest,
+    litellm_request: dict
+) -> Union[Response, StreamingResponse]:
+    """Process the LiteLLM response, converting it back to Anthropic format."""
+    if request.stream:
+        return StreamingResponse(
+            handle_streaming(litellm_response, request),
+            media_type="text/event-stream"
+        )
+    
+    return convert_litellm_to_anthropic(litellm_response, request)
 
 async def count_tokens(request: TokenCountRequest, raw_request: Request):
     """Handle token counting requests."""
     try:
         original_model = request.original_model or request.model
-        display_model = original_model.split("/")[-1] if "/" in original_model else original_model
-        
-        # Convert to MessagesRequest for processing
-        converted_request = convert_anthropic_to_litellm(
-            MessagesRequest(
-                model=request.model,
-                max_tokens=100,  # Arbitrary value not used for token counting
-                messages=request.messages,
-                system=request.system,
-                tools=request.tools,
-                tool_choice=request.tool_choice,
-                thinking=request.thinking
-            )
+        display_model = original_model.split("/")[-1]
+
+        messages_request = MessagesRequest(
+            model=request.model,
+            messages=request.messages,
+            tools=request.tools,
+            # Add other necessary fields with default values
+            max_tokens=1,
+            stream=False,
         )
-        
-        # Log request
-        num_tools = len(request.tools) if request.tools else 0
+        converted_request = convert_anthropic_to_litellm(messages_request)
+
         log_request_beautifully(
             "POST",
             raw_request.url.path,
             display_model,
             converted_request.get('model'),
             len(converted_request['messages']),
-            num_tools,
+            len(request.tools or []),
             200
         )
         
-        # Count tokens using LiteLLM
-        try:
-            from litellm import token_counter
-            token_count = token_counter(
-                model=converted_request["model"],
-                messages=converted_request["messages"],
-            )
-            return TokenCountResponse(input_tokens=token_count)
-        except ImportError:
-            logger.error("Could not import token_counter from litellm")
-            return TokenCountResponse(input_tokens=1000)  # Fallback
-            
+        token_count = litellm.token_counter(
+            model=converted_request["model"],
+            messages=converted_request["messages"],
+        )
+        return TokenCountResponse(input_tokens=token_count)
     except Exception as e:
-        return _handle_error(e)
+        logger.error(f"Error counting tokens: {e}")
+        # Re-raise as HTTPException to be caught by the generic error handler
+        raise HTTPException(status_code=500, detail=f"Failed to count tokens: {e}")
 
 async def root():
     """Root endpoint."""
@@ -120,69 +119,39 @@ async def root():
 
 def _set_api_key(litellm_request: dict, model: str):
     """Set the appropriate API key based on the model."""
-    if model.startswith("openai/"):
-        api_key = Config.get_openai_api_key()
-        litellm_request["api_key"] = api_key
-        logger.debug(f"Using OpenAI API key for model: {model}")
-    elif model.startswith("gemini/"):
-        api_key = Config.get_gemini_api_key()
-        litellm_request["api_key"] = api_key
-        logger.debug(f"Using Gemini API key for model: {model}")
-    else:
-        api_key = Config.get_anthropic_api_key()
-        litellm_request["api_key"] = api_key
-        logger.debug(f"Using Anthropic API key for model: {model}")
-
-def _handle_error(e: Exception) -> HTTPException:
-    """Handle and format errors consistently."""
-    import traceback
-    
-    error_details = {
-        "error": str(e),
-        "type": type(e).__name__,
-        "traceback": traceback.format_exc()
+    provider = model.split('/')[0]
+    api_key_map = {
+        "openai": Config.get_openai_api_key,
+        "gemini": Config.get_gemini_api_key,
     }
     
-    # Check for LiteLLM-specific attributes with safe serialization
-    for attr in ['message', 'status_code', 'llm_provider', 'model']:
-        if hasattr(e, attr):
-            value = getattr(e, attr)
-            error_details[attr] = str(value) if value is not None else None
+    # Default to Anthropic if no specific provider is matched
+    get_key_func = api_key_map.get(provider, Config.get_anthropic_api_key)
+    api_key = get_key_func()
     
-    # Handle response attribute separately (might not be JSON serializable)
-    if hasattr(e, 'response'):
-        response = getattr(e, 'response')
-        if response is not None:
-            error_details['response'] = str(response)
+    if api_key:
+        litellm_request["api_key"] = api_key
+        logger.debug(f"Using {provider or 'anthropic'} API key for model: {model}")
+
+def _handle_error(e: Exception) -> Response:
+    """Handle and format errors consistently."""
+    status_code = getattr(e, "status_code", 500)
     
-    # Check for additional exception details with safe serialization
-    if hasattr(e, '__dict__'):
-        for key, value in e.__dict__.items():
-            if key not in error_details and key not in ['args', '__traceback__', 'response']:
-                try:
-                    # Try to serialize the value
-                    json.dumps(value)
-                    error_details[key] = value
-                except (TypeError, ValueError):
-                    # If not serializable, convert to string
-                    error_details[key] = str(value)
+    error_details = {
+        "error": {
+            "type": type(e).__name__,
+            "message": str(e)
+        }
+    }
     
-    # Safe JSON logging
-    try:
-        logger.error(f"Error processing request: {json.dumps(error_details, indent=2)}")
-    except (TypeError, ValueError) as json_error:
-        logger.error(f"Error processing request (JSON serialization failed): {error_details}")
-        logger.error(f"JSON serialization error: {json_error}")
+    logger.error(
+        "Error processing request",
+        exc_info=True,
+        extra={"error_details": error_details}
+    )
     
-    # Format error message
-    error_message = f"Error: {str(e)}"
-    if 'message' in error_details and error_details['message']:
-        error_message += f"\nMessage: {error_details['message']}"
-    if 'response' in error_details and error_details['response']:
-        error_message += f"\nResponse: {error_details['response']}"
-    
-    status_code = error_details.get('status_code', 500)
-    if not isinstance(status_code, int):
+    # Ensure status_code is a valid integer
+    if not isinstance(status_code, int) or not 100 <= status_code < 600:
         status_code = 500
         
-    raise HTTPException(status_code=status_code, detail=error_message)
+    raise HTTPException(status_code=status_code, detail=json.dumps(error_details))
