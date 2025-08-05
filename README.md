@@ -11,7 +11,7 @@ A proxy server that lets you use Anthropic clients with Gemini or OpenAI models 
 
 ### Prerequisites
 
-- OpenAI API key 🔑
+- OpenAI API key (if using Google provider)🔑
 - Google AI Studio (Gemini) API key (if using Google provider) 🔑
 - [uv](https://github.com/astral-sh/uv) installed.
 
